@@ -282,6 +282,15 @@
     ⚠ このブラウザはWeb Speech APIに対応していません。<strong>Google Chrome</strong> または <strong>Microsoft Edge</strong> で開いてください。
   </div>
 
+  <!-- 前回記録の復元 -->
+  <div id="restore-banner" style="display:none;margin:0 0 14px;padding:12px 14px;border:1px solid #b9d4f0;background:#eef6ff;border-radius:8px;color:#1C2B4A;">
+    <span id="restore-msg" style="font-size:14px;"></span>
+    <span style="white-space:nowrap;">
+      <button class="btn-sm" style="background:#1C2B4A;color:#fff;border-color:#1C2B4A;" onclick="restoreAutosave()">復元する</button>
+      <button class="btn-sm" onclick="discardAutosave()">破棄</button>
+    </span>
+  </div>
+
   <!-- 案件情報 -->
   <div class="card">
     <div class="card-header">📋 案件・会議情報</div>
@@ -322,6 +331,18 @@
         <div class="status" id="status">録音ボタンを押して開始（Chrome / Edge 推奨）</div>
       </div>
       <div class="err" id="err"></div>
+
+      <!-- ① 録音音声（保険） -->
+      <div id="audio-panel" style="display:none;margin-top:14px;padding:12px 14px;border:1px solid #d7e0ea;border-radius:8px;background:#f7faff;">
+        <div style="font-weight:700;color:#1C2B4A;margin-bottom:8px;">🎧 録音した音声（保険用）</div>
+        <audio id="audio-player" controls style="width:100%;"></audio>
+        <div style="margin-top:10px;">
+          <button class="btn btn-export" onclick="saveAudio()">💾 音声ファイルを保存</button>
+        </div>
+        <div style="font-size:12px;color:#666;margin-top:8px;line-height:1.6;">
+          文字起こしがうまくいかなかった場合でも、この音声で聞き直し・あとから文字起こしができます。音声はこのPC内だけに保存され、外部には送信されません。
+        </div>
+      </div>
     </div>
   </div>
 
@@ -332,6 +353,9 @@
       <div>
         <div id="final-box"><span class="ph" id="ph">話した内容がリアルタイムでここに表示されます。</span></div>
         <div id="interim-box">（認識中...）</div>
+        <!-- ④ 手直し編集（録音停止後に使用） -->
+        <textarea id="edit-box" style="display:none;width:100%;min-height:160px;margin-top:8px;padding:10px;border:1px solid #b9d4f0;border-radius:8px;font-size:14px;line-height:1.7;font-family:inherit;box-sizing:border-box;" oninput="onEditInput()"></textarea>
+        <div id="edit-hint" style="display:none;font-size:12px;color:#1C2B4A;margin-top:6px;">✏️ 手直しモード中です。誤変換などをここで直すと、コピー・出力・AI送信すべてに反映されます。</div>
       </div>
 
       <div class="memo-label">📌 メモ・補足（AI送信時に一緒に含まれます）</div>
@@ -341,6 +365,9 @@
         <button class="btn btn-copy"   id="btn-copy"   onclick="copyText()"   disabled>📋 コピー</button>
         <button class="btn btn-clear"  id="btn-clear"  onclick="clearText()"  disabled>🗑 クリア</button>
         <button class="btn btn-export" id="btn-export" onclick="exportText()" disabled>📄 テキスト出力</button>
+        <button class="btn btn-export" id="btn-word"   onclick="exportWord()" disabled>📝 Word出力</button>
+        <button class="btn btn-clear"  id="btn-edit"   onclick="toggleEdit()" disabled>✏️ 手直し</button>
+        <button class="btn btn-copy"   id="btn-save"   onclick="saveToHistory()" disabled>💾 記録を保存</button>
       </div>
 
       <!-- AI送信 -->
@@ -361,6 +388,14 @@
         ✅ コピー完了！　AIのページで <kbd style="background:#fff;color:#1C2B4A;border-radius:4px;padding:2px 8px;font-size:13px;">Ctrl+V（またはペースト）</kbd> を押して貼り付けてください
       </div>
       <div class="ai-note">ボタンを押すとAIページが開き、自動で入力されます（ChatGPT・Claude）。長い文字起こしや Gemini の場合はコピー済みなので Ctrl+V で貼り付けてください。</div>
+    </div>
+  </div>
+
+  <!-- ② 保存した記録（履歴） -->
+  <div class="card" id="history-card" style="display:none;">
+    <div class="card-header">📚 保存した記録</div>
+    <div class="card-body">
+      <div id="history-list"></div>
     </div>
   </div>
 
@@ -413,6 +448,19 @@ let sessionSpeaker = '';
 let gotAnyResult   = false;
 let lastRecogError = '';
 
+// ① 録音音声（保険）
+let mediaStream    = null;
+let mediaRecorder  = null;
+let audioChunks    = [];
+let lastAudioBlob  = null;
+let lastAudioUrl   = null;
+// ② 自動保存／履歴
+let autosaveTimer  = null;
+const LS_AUTOSAVE  = 'gijiroku_autosave_v1';
+const LS_HISTORY   = 'gijiroku_history_v1';
+// ④ 仕上げ編集（手直しした全文。null のときは segments から生成）
+let editedTranscript = null;
+
 // ── 録音トグル ───────────────────────────────────────
 function toggleRec() {
   isRecording ? stopRec() : startRec();
@@ -433,6 +481,16 @@ function startRec() {
   setStatus('録音中... 終了したらもう一度押してください', 'on');
   startTimer();
   requestWakeLock();
+
+  // ④ 手直しモードを終了し編集内容をリセット
+  exitEditMode();
+  editedTranscript = null;
+  // ① 前回の音声パネルを隠して新規録音開始
+  hideAudioPanel();
+  startAudioRecording();
+  // ② 自動保存を開始
+  startAutosave();
+
   render('');
 
   watchdogTimer = setInterval(() => {
@@ -524,6 +582,8 @@ function stopRec() {
   commitSession();
   releaseWakeLock();
   stopTimer();
+  stopAudioRecording();   // ① 音声録音を確定（停止後にパネル表示）
+  stopAutosave();         // ② 自動保存を停止＋最終保存
   render('');
 
   document.getElementById('rec-btn').className = 'rec-btn idle';
@@ -564,6 +624,7 @@ function commitSession() {
   segments.push({ time: sessionTs, speaker: sessionSpeaker, text });
   render('');
   enableButtons();
+  saveAutosave();   // ② セグメント確定ごとに自動保存
 }
 
 // ── 表示（segments + 現在セッション + 認識中）を毎回描画 ─
@@ -589,6 +650,8 @@ function fmtLine(s) {
 
 // ── 文字起こし全文（コピー・出力・AI送信用） ─────────
 function buildTranscript() {
+  // ④ 手直しした全文があればそれを優先
+  if (editedTranscript != null) return editedTranscript;
   const lines = segments.map(fmtLine);
   if (sessionFinal.trim()) {
     lines.push(fmtLine({ time: sessionTs, speaker: sessionSpeaker, text: sessionFinal.trim() }));
@@ -619,21 +682,25 @@ document.addEventListener('visibilitychange', () => {
 
 // ── クリア ───────────────────────────────────────────
 function clearText() {
-  if (!confirm('文字起こしをクリアしますか？')) return;
+  if (!confirm('文字起こしをクリアしますか？（保存した記録は消えません）')) return;
   segments     = [];
   sessionFinal = '';
+  editedTranscript = null;
+  exitEditMode();
+  hideAudioPanel();
+  try { localStorage.removeItem(LS_AUTOSAVE); } catch(_) {}
   render('');
   document.getElementById('final-box').innerHTML =
     '<span class="ph">話した内容がリアルタイムでここに表示されます。</span>';
   document.getElementById('interim-box').textContent = '';
-  ['btn-copy','btn-clear','btn-export','btn-gpt','btn-claude','btn-gemini'].forEach(id => {
+  ['btn-copy','btn-clear','btn-export','btn-word','btn-edit','btn-save','btn-gpt','btn-claude','btn-gemini'].forEach(id => {
     document.getElementById(id).disabled = true;
   });
   setStatus('クリアしました。録音ボタンを押して再開してください。', '');
 }
 
 function enableButtons() {
-  ['btn-copy','btn-clear','btn-export','btn-gpt','btn-claude','btn-gemini'].forEach(id => {
+  ['btn-copy','btn-clear','btn-export','btn-word','btn-edit','btn-save','btn-gpt','btn-claude','btn-gemini'].forEach(id => {
     document.getElementById(id).disabled = false;
   });
 }
@@ -804,6 +871,275 @@ function showErr(msg) {
   el.textContent = msg; el.classList.add('on');
 }
 function hideErr() { document.getElementById('err').classList.remove('on'); }
+
+// ═══════════════════════════════════════════════════════
+// 追加機能：① 録音音声保存　② 自動保存／履歴　④ 手直し・Word出力
+// ═══════════════════════════════════════════════════════
+
+// ── 共通ヘルパー ─────────────────────────────────────
+function val(id){ const e=document.getElementById(id); return e ? e.value.trim() : ''; }
+function setVal(id,v){ const e=document.getElementById(id); if(e) e.value = v || ''; }
+function getMeta(){
+  return { title:val('meetingTitle'), date:val('meetingDate'),
+           place:val('meetingPlace'), members:val('meetingMembers'), memo:val('memoArea') };
+}
+function escapeHtml(s){
+  return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fileBase(){
+  const m=getMeta();
+  const t=(m.title||'議事録');
+  const d=(m.date||'').replace(/[\\/:*?"<>|]/g,'-');
+  return (t + (d?'_'+d:'')).replace(/\s+/g,'_');
+}
+// File System Access API があれば保存先を選べる（事件フォルダ等）。無ければ通常ダウンロード。
+async function saveBlob(blob, filename, accept){
+  if (window.showSaveFilePicker){
+    try{
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: accept ? [{ description:'保存', accept }] : undefined,
+      });
+      const w = await handle.createWritable();
+      await w.write(blob); await w.close();
+      setStatus('保存しました：'+filename, 'done');
+      return;
+    }catch(e){ if (e && e.name === 'AbortError') return; /* それ以外はDLへ */ }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1500);
+}
+
+// ── ① 録音音声（保険） ───────────────────────────────
+async function startAudioRecording(){
+  if (!navigator.mediaDevices || !window.MediaRecorder) return;
+  try{
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio:true });
+    audioChunks = [];
+    let opt;
+    try{ if (MediaRecorder.isTypeSupported('audio/webm')) opt = { mimeType:'audio/webm' }; }catch(_){}
+    mediaRecorder = new MediaRecorder(mediaStream, opt);
+    mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) audioChunks.push(e.data); };
+    mediaRecorder.start(2000);
+  }catch(err){
+    // マイク取得に失敗しても文字起こしは継続（音声保険が無くなるだけ）
+    mediaStream = null; mediaRecorder = null;
+  }
+}
+function stopStreamTracks(){
+  if (mediaStream){ try{ mediaStream.getTracks().forEach(t=>t.stop()); }catch(_){} mediaStream=null; }
+}
+function stopAudioRecording(){
+  try{
+    if (mediaRecorder && mediaRecorder.state !== 'inactive'){
+      mediaRecorder.onstop = () => {
+        try{
+          if (audioChunks.length){
+            lastAudioBlob = new Blob(audioChunks, { type:(mediaRecorder && mediaRecorder.mimeType) || 'audio/webm' });
+            showAudioPanel(lastAudioBlob);
+          }
+        }catch(_){}
+        stopStreamTracks();
+      };
+      mediaRecorder.stop();
+    } else {
+      stopStreamTracks();
+    }
+  }catch(_){ stopStreamTracks(); }
+}
+function showAudioPanel(blob){
+  const panel=document.getElementById('audio-panel');
+  const player=document.getElementById('audio-player');
+  if (lastAudioUrl) URL.revokeObjectURL(lastAudioUrl);
+  lastAudioUrl = URL.createObjectURL(blob);
+  player.src = lastAudioUrl;
+  panel.style.display='block';
+}
+function hideAudioPanel(){
+  const panel=document.getElementById('audio-panel');
+  const player=document.getElementById('audio-player');
+  if (panel) panel.style.display='none';
+  if (player) player.removeAttribute('src');
+  if (lastAudioUrl){ URL.revokeObjectURL(lastAudioUrl); lastAudioUrl=null; }
+  lastAudioBlob=null;
+}
+async function saveAudio(){
+  if (!lastAudioBlob){ alert('保存できる音声がありません。'); return; }
+  const ext = (lastAudioBlob.type.indexOf('ogg')>=0) ? 'ogg' : 'webm';
+  await saveBlob(lastAudioBlob, fileBase()+'.'+ext, { 'audio/webm':['.webm'] });
+}
+
+// ── ② 自動保存／復元／履歴 ───────────────────────────
+function currentState(){
+  return { meta:getMeta(), segments:segments, sessionFinal:sessionFinal,
+           edited:editedTranscript, savedAt:Date.now() };
+}
+function startAutosave(){ stopAutosave(); autosaveTimer = setInterval(saveAutosave, 3000); }
+function stopAutosave(){ if (autosaveTimer){ clearInterval(autosaveTimer); autosaveTimer=null; } saveAutosave(); }
+function saveAutosave(){
+  try{
+    if (!segments.length && !sessionFinal.trim() && editedTranscript==null) return;
+    localStorage.setItem(LS_AUTOSAVE, JSON.stringify(currentState()));
+  }catch(_){}
+}
+function loadAutosave(){ try{ const s=localStorage.getItem(LS_AUTOSAVE); return s?JSON.parse(s):null; }catch(_){ return null; } }
+function applyState(s){
+  segments = (s.segments||[]).slice();
+  sessionFinal = s.sessionFinal || '';
+  editedTranscript = (s.edited!=null) ? s.edited : null;
+  if (s.meta){
+    setVal('meetingTitle',s.meta.title); setVal('meetingDate',s.meta.date);
+    setVal('meetingPlace',s.meta.place); setVal('meetingMembers',s.meta.members);
+    setVal('memoArea',s.meta.memo);
+  }
+  exitEditMode();
+  render('');
+  if (editedTranscript != null){
+    const fb=document.getElementById('final-box'); if(fb) fb.textContent = editedTranscript;
+  }
+  if (segments.length || (editedTranscript && editedTranscript.trim())) enableButtons();
+}
+function initRestoreBanner(){
+  if (isRecording) return;
+  const s=loadAutosave();
+  if (!s || !((s.segments && s.segments.length) || (s.edited && s.edited.trim()))) return;
+  const n = s.segments ? s.segments.length : 0;
+  const when = s.savedAt ? new Date(s.savedAt).toLocaleString('ja-JP') : '';
+  const title = (s.meta && s.meta.title) ? '「'+s.meta.title+'」' : '';
+  document.getElementById('restore-msg').textContent =
+    `前回の記録${title}が残っています（${n}件・${when}）。復元しますか？`;
+  const b=document.getElementById('restore-banner');
+  b.style.display='flex'; b.style.justifyContent='space-between'; b.style.alignItems='center'; b.style.gap='10px';
+}
+function restoreAutosave(){
+  const s=loadAutosave(); if(!s) return;
+  applyState(s);
+  document.getElementById('restore-banner').style.display='none';
+  setStatus('前回の記録を復元しました。', 'done');
+}
+function discardAutosave(){
+  try{ localStorage.removeItem(LS_AUTOSAVE); }catch(_){}
+  document.getElementById('restore-banner').style.display='none';
+}
+function loadHistory(){ try{ const s=localStorage.getItem(LS_HISTORY); return s?JSON.parse(s):[]; }catch(_){ return []; } }
+function writeHistory(arr){
+  try{ localStorage.setItem(LS_HISTORY, JSON.stringify(arr)); }
+  catch(e){ alert('保存に失敗しました（ブラウザの保存容量の上限に達した可能性）。古い記録を削除してください。'); }
+}
+function saveToHistory(){
+  const t=buildTranscript().trim();
+  if (!t){ alert('保存できる文字起こしがありません。'); return; }
+  const meta=getMeta();
+  const arr=loadHistory();
+  arr.unshift({
+    id:String(Date.now()),
+    name: meta.title || meta.date || ('記録 '+new Date().toLocaleString('ja-JP')),
+    meta, segments:segments.slice(), sessionFinal, edited:editedTranscript, savedAt:Date.now()
+  });
+  writeHistory(arr);
+  try{ localStorage.removeItem(LS_AUTOSAVE); }catch(_){}
+  renderHistory();
+  setStatus('記録を保存しました（📚 保存した記録に追加）。', 'done');
+}
+function findHistory(id){ return loadHistory().find(x=>x.id===id); }
+function renderHistory(){
+  const arr=loadHistory();
+  const card=document.getElementById('history-card');
+  const list=document.getElementById('history-list');
+  if (!arr.length){ card.style.display='none'; list.innerHTML=''; return; }
+  card.style.display='block';
+  list.innerHTML = arr.map(it=>{
+    const when = it.savedAt ? new Date(it.savedAt).toLocaleString('ja-JP') : '';
+    const n = it.segments ? it.segments.length : 0;
+    return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid #eef2f7;">
+      <div style="min-width:0;">
+        <div style="font-weight:700;color:#1C2B4A;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(it.name)}</div>
+        <div style="font-size:12px;color:#888;">${when} ／ ${n}件</div>
+      </div>
+      <div style="white-space:nowrap;">
+        <button class="btn-sm" onclick="openHistoryItem('${it.id}')">開く</button>
+        <button class="btn-sm" onclick="copyHistoryItem('${it.id}')">コピー</button>
+        <button class="btn-sm" onclick="deleteHistoryItem('${it.id}')">削除</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+function openHistoryItem(id){
+  if (isRecording){ alert('録音中は開けません。先に録音を停止してください。'); return; }
+  const it=findHistory(id); if(!it) return;
+  hideAudioPanel();
+  applyState(it);
+  setStatus('保存した記録を開きました。', 'done');
+  window.scrollTo({ top:0, behavior:'smooth' });
+}
+function copyHistoryItem(id){
+  const it=findHistory(id); if(!it) return;
+  const text = (it.edited!=null) ? it.edited : (it.segments||[]).map(fmtLine).join('\n');
+  navigator.clipboard.writeText(text).then(()=> setStatus('コピーしました。', 'done'));
+}
+function deleteHistoryItem(id){
+  if (!confirm('この記録を削除しますか？')) return;
+  writeHistory(loadHistory().filter(x=>x.id!==id));
+  renderHistory();
+}
+
+// ── ④ 手直し編集 ／ Word出力 ─────────────────────────
+function toggleEdit(){
+  const box=document.getElementById('edit-box');
+  if (box.style.display==='none' || !box.style.display) enterEditMode();
+  else exitEditMode();
+}
+function enterEditMode(){
+  const box=document.getElementById('edit-box');
+  box.value = buildTranscript();
+  box.style.display='block';
+  document.getElementById('edit-hint').style.display='block';
+  document.getElementById('final-box').style.display='none';
+  const btn=document.getElementById('btn-edit'); if(btn) btn.textContent='✓ 手直し終了';
+}
+function exitEditMode(){
+  const box=document.getElementById('edit-box');
+  if (!box) return;
+  box.style.display='none';
+  const hint=document.getElementById('edit-hint'); if(hint) hint.style.display='none';
+  const fb=document.getElementById('final-box');
+  if (fb){
+    fb.style.display='';
+    if (editedTranscript != null && editedTranscript.trim()) fb.textContent = editedTranscript;
+  }
+  const btn=document.getElementById('btn-edit'); if(btn) btn.textContent='✏️ 手直し';
+}
+function onEditInput(){
+  editedTranscript = document.getElementById('edit-box').value;
+  saveAutosave();
+}
+async function exportWord(){
+  const m=getMeta();
+  const transcript = buildTranscript().trim();
+  if (!transcript){ alert('出力できる文字起こしがありません。'); return; }
+  let rows='';
+  if (m.title)   rows+=`<tr><td style="background:#f0f4f9;font-weight:bold;">案件名</td><td>${escapeHtml(m.title)}</td></tr>`;
+  if (m.date)    rows+=`<tr><td style="background:#f0f4f9;font-weight:bold;">日時</td><td>${escapeHtml(m.date)}</td></tr>`;
+  if (m.place)   rows+=`<tr><td style="background:#f0f4f9;font-weight:bold;">場所・方法</td><td>${escapeHtml(m.place)}</td></tr>`;
+  if (m.members) rows+=`<tr><td style="background:#f0f4f9;font-weight:bold;">出席者</td><td>${escapeHtml(m.members)}</td></tr>`;
+  const memoBlock = m.memo ? `<h3>メモ・補足</h3><p>${escapeHtml(m.memo).replace(/\n/g,'<br>')}</p>` : '';
+  const body = `
+    <h2 style="text-align:center;">議事録</h2>
+    ${rows ? `<table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;width:100%;">${rows}</table>` : ''}
+    <h3>発言記録</h3>
+    <p style="white-space:pre-wrap;">${escapeHtml(transcript).replace(/\n/g,'<br>')}</p>
+    ${memoBlock}`;
+  const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><title>議事録</title></head><body style="font-family:'Yu Gothic','MS Gothic',sans-serif;font-size:11pt;line-height:1.7;">${body}</body></html>`;
+  const blob = new Blob(['﻿'+html], { type:'application/msword' });
+  await saveBlob(blob, fileBase()+'.doc', { 'application/msword':['.doc'] });
+}
+
+// ── 起動時：履歴表示＋前回記録の復元案内 ──────────────
+renderHistory();
+initRestoreBanner();
 </script>
 </body>
 </html>
