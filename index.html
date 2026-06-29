@@ -701,8 +701,33 @@ const AI_URLS = {
 };
 // ?q= に載せられる目安の上限（エンコード後の長さ）。これを超えたらCtrl+V方式にフォールバック
 const MAX_PREFILL = 6000;
+// ローカル貼り付けヘルパー（メール返信補助のサーバーを流用）。動いていれば長文でも完全自動貼り付け
+const LOCAL_PASTE_URL = 'http://localhost:3000/api/ai/open-paste';
 
-function openAI(service) {
+// 手元のヘルパーが動いていれば、それで自動貼り付け（クリップボードに入れて物理的にCtrl+Vを押す方式）
+// 動いていない／対応外なら false を返してフォールバックさせる
+async function tryLocalPaste(full, service) {
+  if (service !== 'gpt' && service !== 'claude') return false; // GeminiはヘルパーAPI未対応
+  const ai = service === 'gpt' ? 'chatgpt' : 'claude';
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2000); // 起動していなければ即フォールバック
+    const r = await fetch(LOCAL_PASTE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: full, ai }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (!r.ok) return false;
+    const j = await r.json().catch(() => ({}));
+    return !!j.ok;
+  } catch {
+    return false; // サーバー未起動・通信不可など
+  }
+}
+
+async function openAI(service) {
   const transcript = buildTranscript().trim();
   if (!transcript) return;
   const prompt = document.getElementById('promptEditor').value.trim();
@@ -710,26 +735,34 @@ function openAI(service) {
   let full = `${prompt}\n\n${transcript}`;
   if (memo) full += `\n\n【メモ・補足】\n${memo}`;
 
-  // ?q= で自動入力できるか判定（ChatGPT / Claude のみ。長すぎる場合は不可）
+  // クリップボードへのコピーは保険として常に実行（フォールバック時のCtrl+V用）
+  await navigator.clipboard.writeText(full).catch(() => {});
+
+  // ① まず手元の貼り付けヘルパー（メール返信補助のサーバー）で完全自動貼り付けを試す
+  setStatus('AIを準備中…', '');
+  const pasted = await tryLocalPaste(full, service);
+  if (pasted) {
+    setStatus('✅ AIを開いて自動で貼り付けました', 'done');
+    return;
+  }
+
+  // ② フォールバック：?q= 自動入力（短文）／クリップボード＋Ctrl+V（長文・Gemini）
   const encoded   = encodeURIComponent(full);
   const canPrefill = (service === 'gpt' || service === 'claude') && encoded.length <= MAX_PREFILL;
   let url = AI_URLS[service];
   if (canPrefill) url += (url.includes('?') ? '&' : '?') + 'q=' + encoded;
+  window.open(url, '_blank');
 
-  // クリップボードへのコピーは保険として常に実行（自動入力が効かない時のCtrl+V用）
-  navigator.clipboard.writeText(full).catch(() => {}).finally(() => {
-    window.open(url, '_blank');
-    const toast = document.getElementById('ai-toast');
-    if (canPrefill) {
-      setStatus('✅ AIページに自動入力しました', 'done');
-    } else {
-      if (toast) {
-        toast.style.display = 'block';
-        setTimeout(() => { toast.style.display = 'none'; }, 5000);
-      }
-      setStatus('✅ コピー済み。AIページで貼り付け（Ctrl+V）してください', 'done');
+  const toast = document.getElementById('ai-toast');
+  if (canPrefill) {
+    setStatus('✅ AIページに自動入力しました', 'done');
+  } else {
+    if (toast) {
+      toast.style.display = 'block';
+      setTimeout(() => { toast.style.display = 'none'; }, 5000);
     }
-  });
+    setStatus('✅ コピー済み。AIページで貼り付け（Ctrl+V）してください', 'done');
+  }
 }
 
 // ── タイマー ─────────────────────────────────────────
