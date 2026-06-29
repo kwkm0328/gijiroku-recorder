@@ -409,6 +409,10 @@ let sessionFinal  = '';
 let sessionTs     = '00:00';
 let sessionSpeaker = '';
 
+// 診断用：録音中に認識結果が来ているか／最後の認識エラー
+let gotAnyResult   = false;
+let lastRecogError = '';
+
 // ── 録音トグル ───────────────────────────────────────
 function toggleRec() {
   isRecording ? stopRec() : startRec();
@@ -419,6 +423,8 @@ function startRec() {
   isRecording    = true;
   segments       = [];
   sessionFinal   = '';
+  gotAnyResult   = false;
+  lastRecogError = '';
 
   document.getElementById('rec-btn').className = 'rec-btn on';
   document.getElementById('rec-btn').textContent = '⏹';
@@ -431,6 +437,11 @@ function startRec() {
 
   watchdogTimer = setInterval(() => {
     if (isRecording && !recognitionActive && !recognitionStarting) scheduleRestart(0);
+    // 録音中なのに一定時間まったく認識結果が来ない場合、原因のヒントを表示
+    if (isRecording && !gotAnyResult && startTime && (Date.now() - startTime) > 8000) {
+      const detail = lastRecogError ? `（認識エンジンの状態：${lastRecogError}）` : '';
+      showErr('音声を認識できていません。確認してください→ ①アドレスバー左のマイクが「許可」になっているか ②使用するマイクが正しいか ③Webex・Teams・Zoom など他アプリが同じマイクを使っていないか。' + detail);
+    }
   }, 1000);
 
   startRecognitionSession();
@@ -467,11 +478,13 @@ function startRecognitionSession() {
       else                      interim += t;
     }
     sessionFinal = finals.trim();
+    if (finals || interim) { gotAnyResult = true; hideErr(); }
     render(interim.trim());
     if (sessionFinal) enableButtons();
   };
 
   recognition.onerror = (e) => {
+    lastRecogError = e.error || '';
     if (e.error === 'aborted') return;
     if (e.error === 'not-allowed') {
       showErr('マイクへのアクセスが拒否されました。ブラウザのアドレスバー左のマイクアイコンから許可してください。');
