@@ -321,10 +321,6 @@
         </div>
         <div class="status" id="status">録音ボタンを押して開始（Chrome / Edge 推奨）</div>
       </div>
-      <div class="speaker-row">
-        <label>現在の発言者：</label>
-        <input type="text" id="currentSpeaker" placeholder="例：川上弁護士（空欄でも可）">
-      </div>
       <div class="err" id="err"></div>
     </div>
   </div>
@@ -364,7 +360,7 @@
       <div class="ai-toast" id="ai-toast">
         ✅ コピー完了！　AIのページで <kbd style="background:#fff;color:#1C2B4A;border-radius:4px;padding:2px 8px;font-size:13px;">Ctrl+V（またはペースト）</kbd> を押して貼り付けてください
       </div>
-      <div class="ai-note">ボタンを押すと「プロンプト＋文字起こし」をクリップボードにコピーしてAIページを開きます</div>
+      <div class="ai-note">ボタンを押すとAIページが開き、自動で入力されます（ChatGPT・Claude）。長い文字起こしや Gemini の場合はコピー済みなので Ctrl+V で貼り付けてください。</div>
     </div>
   </div>
 
@@ -452,7 +448,7 @@ function startRecognitionSession() {
   // このセッションの開始情報を記録
   sessionFinal   = '';
   sessionTs      = getElapsed();
-  sessionSpeaker = document.getElementById('currentSpeaker').value.trim();
+  sessionSpeaker = '';
 
   recognition.onstart = () => {
     recognitionStarting = false;
@@ -666,7 +662,7 @@ function exportText() {
 
 // ── AI送信 ───────────────────────────────────────────
 const DEFAULT_PROMPT =
-`以下は打ち合わせの音声文字起こしです。これをもとに、実務で使える議事録を作成してください。
+`あなたは日本の法律事務所（弁護士）の打ち合わせを補助するアシスタントです。以下は打ち合わせの音声文字起こしです。これをもとに、実務で使える議事録を作成してください。
 
 【議事録の構成】
 - 日時・出席者・議題
@@ -674,6 +670,17 @@ const DEFAULT_PROMPT =
 - 決定事項
 - 次回アクション（誰が・何を・いつまでに）
 - 備考・要確認事項
+
+【法律用語の取り扱い（重要）】
+- これは法律相談・訴訟・契約等に関する打ち合わせです。法律用語は正確な漢字・正式名称で表記してください。
+- 音声認識の誤変換が多く含まれます。文脈から正しい法律用語を判断して直してください。よくある誤りの例：
+  ・「相殺」は「そうさい」（×そうさつ／×総裁）　・「瑕疵（かし）」（×歌詞／×家事）
+  ・「既判力」「遡及」「遺留分（いりゅうぶん）」「代位弁済」「求償」「供託」「保全」「仮差押え」「仮処分」
+  ・「抗弁」「準備書面」「答弁書」「訴状」「弁論」「和解」「調停」「受任」「委任状」
+  ・「善意・悪意」は法律上の意味（事情を知らない／知っている）で用いる
+- 「だいたい」「〜みたいな」等の口語は、議事録では適切な書き言葉に整える（ただし金額・期日・固有名詞・当事者の発言の趣旨は変えない）。
+- 当事者名・会社名・地名などの固有名詞は推測で書き換えない。聞き取れない／確信が持てない箇所は内容を創作せず「【要確認】」と明記する。
+- 金額・日付・期限は特に正確に。誤変換の疑いがあれば「【要確認】」を付す。
 
 【文字起こし】`;
 
@@ -685,11 +692,15 @@ function resetPrompt() {
   }
 }
 
+// 各AIのトップURL。?q= に本文を載せると開いた瞬間に入力欄へ自動入力される
+// （ChatGPT / Claude のみ対応。長すぎるとURLが通らないため上限を設ける）
 const AI_URLS = {
   gpt:    'https://chatgpt.com/',
   claude: 'https://claude.ai/new',
   gemini: 'https://gemini.google.com/app',
 };
+// ?q= に載せられる目安の上限（エンコード後の長さ）。これを超えたらCtrl+V方式にフォールバック
+const MAX_PREFILL = 6000;
 
 function openAI(service) {
   const transcript = buildTranscript().trim();
@@ -698,12 +709,26 @@ function openAI(service) {
   const memo   = document.getElementById('memoArea').value.trim();
   let full = `${prompt}\n\n${transcript}`;
   if (memo) full += `\n\n【メモ・補足】\n${memo}`;
-  navigator.clipboard.writeText(full).then(() => {
+
+  // ?q= で自動入力できるか判定（ChatGPT / Claude のみ。長すぎる場合は不可）
+  const encoded   = encodeURIComponent(full);
+  const canPrefill = (service === 'gpt' || service === 'claude') && encoded.length <= MAX_PREFILL;
+  let url = AI_URLS[service];
+  if (canPrefill) url += (url.includes('?') ? '&' : '?') + 'q=' + encoded;
+
+  // クリップボードへのコピーは保険として常に実行（自動入力が効かない時のCtrl+V用）
+  navigator.clipboard.writeText(full).catch(() => {}).finally(() => {
+    window.open(url, '_blank');
     const toast = document.getElementById('ai-toast');
-    toast.style.display = 'block';
-    setTimeout(() => { toast.style.display = 'none'; }, 5000);
-    window.open(AI_URLS[service], '_blank');
-    setStatus('✅ コピー済み。AIページでペーストしてください', 'done');
+    if (canPrefill) {
+      setStatus('✅ AIページに自動入力しました', 'done');
+    } else {
+      if (toast) {
+        toast.style.display = 'block';
+        setTimeout(() => { toast.style.display = 'none'; }, 5000);
+      }
+      setStatus('✅ コピー済み。AIページで貼り付け（Ctrl+V）してください', 'done');
+    }
   });
 }
 
